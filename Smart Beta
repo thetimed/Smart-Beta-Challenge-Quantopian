@@ -1,0 +1,135 @@
+"""
+This is a template algorithm on Quantopian for you to adapt and fill in.
+"""
+import pandas as pd
+import quantopian.optimize as opt
+import quantopian.algorithm as algo
+from quantopian.pipeline import Pipeline
+from quantopian.pipeline.data.sentdex import sentiment 
+from quantopian.pipeline.factors import AverageDollarVolume, SimpleMovingAverage, Returns
+from quantopian.pipeline.data import Fundamentals
+from quantopian.pipeline.data.builtin import USEquityPricing
+from quantopian.pipeline.filters import QTradableStocksUS
+from quantopian.pipeline import Pipeline
+from quantopian.pipeline.data.psychsignal import (
+    aggregated_twitter_withretweets_stocktwits, #Psychsignal data from Twitter and Stocktwits.
+    stocktwits,                                 #Psychsignal data from Stocktwits.
+    twitter_noretweets,                         #Psychsignal data from Twitter (no retweets).
+    twitter_withretweets,                       #Psychsignal data from Twitter (with retweets).
+)
+import quantopian.optimize as opt
+import numpy as np  
+import math
+
+
+def initialize(context):
+    """
+    Called once at the start of the algorithm.
+    """
+    # Rebalance every month to reduce turnoever, 1 hour after market open.
+    algo.schedule_function(
+        rebalance,
+        algo.date_rules.month_start(),
+        algo.time_rules.market_open(hours=1),
+    )
+
+    # Record tracking variables at the end of each day.
+    algo.schedule_function(
+        record_vars,
+        algo.date_rules.every_day(),
+        algo.time_rules.market_close(),
+    )
+
+    # Create our dynamic stock selector.
+    algo.attach_pipeline(pipeline(), 'pipeline')
+
+def pipeline():
+    Dollar_volume = AverageDollarVolume(window_length=28)
+    Decent_dollar_volume = Dollar_volume.percentile_between(70, 100)
+    growth_grade = Fundamentals.operation_revenue_growth3_month_avg.latest
+    revenue_growth = Fundamentals.revenue_growth.latest 
+    #find the 7 days moving average of sentiment because we have to move fast 
+    mean_sentiment_30day = SimpleMovingAverage(inputs=[sentiment.sentiment_signal],
+                                          window_length=30)
+    #find the 14,30 days moving average of sentiment because we have to move fast 
+
+    sma_200  = SimpleMovingAverage(inputs = [USEquityPricing.close], window_length = 200)  
+    sma_30 = SimpleMovingAverage(inputs = [USEquityPricing.close], window_length = 30)
+    universe = (QTradableStocksUS() & Decent_dollar_volume)
+    SMA_conditions = (sma_30 > sma_200)
+    Bullish_stocktwits_twitter = (aggregated_twitter_withretweets_stocktwits.bullish_intensity.latest > 1)
+    Bearish_stocktwits_twitter = (aggregated_twitter_withretweets_stocktwits.bearish_intensity.latest > 1)
+    x = aggregated_twitter_withretweets_stocktwits.total_scanned_messages.latest
+
+
+    
+    #simple moving average prices
+    
+    #We need high average dollar volume also 
+    """The growth in the company’s operating revenue on a percentage basis.
+    Morningstar calculates the growth percentage based on the underlying operating 
+    revenue data reported in the Income Statement within the company filings or reports."""
+    
+    #factor_1 = growth_grade.rank(mask=universe , method = 'average')
+    factor_2 = revenue_growth.rank(mask=universe , method = 'average')
+    factor_3 = mean_sentiment_30day > 2
+    
+    longs = factor_2.percentile_between(90, 100)  
+
+    
+    pipe = Pipeline(columns={'factor': longs,
+                            'sma':factor_3,
+                            'Twitter':Bullish_stocktwits_twitter},# or SMA_conditions or Bullish_stocktwits or Bearish_stocktwits},
+    screen = (universe))
+    
+    return pipe
+
+#1326 mean
+
+def before_trading_start(context, data):
+    """
+    Called every day before market open.
+    """
+    context.output = algo.pipeline_output('pipeline')
+    context.output = context.output.assign(longs =(context.output['Twitter'] == True) | (context.output['factor'] == True) |  (context.output['sma'] == True))
+    
+    # These are the securities that we are interested in trading each day.
+    context.security_list = context.output.index
+
+
+def rebalance(context, data):
+    """
+    Execute orders according to our schedule_function() timing.
+    """
+    context.weights = {}
+    long_secs = context.output[context.output['longs']].index
+
+
+    for sec in long_secs:
+        if data.can_trade(sec):
+            context.weights[sec] = 1/len(long_secs)
+            
+        
+   
+    algo.order_optimal_portfolio(
+        objective=opt.TargetWeights(context.weights),
+        constraints=[]
+    )
+
+
+def record_vars(context, data):
+    long_count = 0
+    short_count = 0
+    for position in context.portfolio.positions.values():
+        if position.amount > 0:
+            long_count += 1
+
+    # Plot the counts
+    record(num_long=long_count, num_short=short_count, leverage=context.account.leverage)
+
+
+def handle_data(context, data):
+    """
+    Called every minute.
+    """
+    pass
